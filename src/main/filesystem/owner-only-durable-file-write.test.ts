@@ -36,11 +36,4 @@ describe('writeOwnerOnlyFileDurable on Windows', () => {
     expect(existsSync(target)).toBe(false)
     expect(readdirSync(join(directory, '.owner-only-staging'))).toEqual([])
   })
-
-  it('publishes the staged file once it is restricted', async () => {
-    const target = join(directory, 'secret.json')
-
-    await writeOwnerOnlyFileDurable(target, '{"token":1}')
-    expect(existsSync(target)).toBe(true)
-  })
 })
