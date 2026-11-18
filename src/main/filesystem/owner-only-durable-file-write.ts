@@ -35,12 +35,12 @@ export async function writeOwnerOnlyFileDurable(
     } finally {
       await handle.close()
     }
+    // Protected before it is published, so a later change to the parent's inheritance never reaches it.
+    if (windows && !(await restrictWindowsFile(tmpPath)) && windowsSecurityLoaded()) {
+      throw new Error(`Could not restrict ${tmpPath} to its owner`)
+    }
     await renameFileWithWindowsRetryAsync(tmpPath, finalPath)
     renamed = true
-    if (windows) {
-      // Protected, so a later change to the parent's inheritance never reaches it.
-      await restrictWindowsFile(finalPath)
-    }
     await syncDirectory(directory)
   } finally {
     if (!renamed) {
@@ -63,14 +63,23 @@ function windowsStaging(directory: string): Promise<string> {
 
 async function prepareWindowsStaging(staging: string): Promise<string> {
   await mkdir(staging, { recursive: true })
-  if (!(await restrictWindowsDirectory(staging)) && !('error' in loadWindowsSecurity())) {
+  if (!(await restrictWindowsDirectory(staging)) && windowsSecurityLoaded()) {
     throw new Error(`Could not restrict ${staging} to its owner`)
   }
+  await removeStaleOwnerOnlyStaging(dirname(staging))
+  return staging
+}
+
+/** Drops what earlier runs left staged for `directory`'s files; for a sign-out or deletion that
+ *  writes nothing after. Only this process's own staged files are kept. */
+export async function removeStaleOwnerOnlyStaging(directory: string): Promise<void> {
+  const staging = join(directory, WINDOWS_STAGING_FOLDER)
   const own = `.${process.pid}.`
   for (const name of await readdir(staging).catch(() => [])) {
     if (name.endsWith('.tmp') && !name.includes(own)) {
       await rm(join(staging, name), { force: true }).catch(() => {})
     }
   }
-  return staging
 }
+
+const windowsSecurityLoaded = (): boolean => !('error' in loadWindowsSecurity())

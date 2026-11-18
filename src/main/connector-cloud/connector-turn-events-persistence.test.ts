@@ -48,6 +48,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 vi.mock('../filesystem/owner-only-durable-file-write', async (importOriginal) => {
   const actual = await importOriginal<typeof OwnerOnlyWrite>()
   return {
+    ...actual,
     writeOwnerOnlyFileDurable: async (
       ...args: Parameters<typeof actual.writeOwnerOnlyFileDurable>
     ) => {

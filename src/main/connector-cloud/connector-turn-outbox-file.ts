@@ -3,13 +3,17 @@
 // always lands before the delete that follows it.
 import { readFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
+import { dirname } from 'node:path'
 import { z } from 'zod'
 import {
   ConnectorConversation,
   type ConnectorEvent
 } from '../../shared/connectors/connector-cloud-contract'
 import { removeStaleDurableWriteTempFiles } from '../filesystem/durable-file-write'
-import { writeOwnerOnlyFileDurable } from '../filesystem/owner-only-durable-file-write'
+import {
+  removeStaleOwnerOnlyStaging,
+  writeOwnerOnlyFileDurable
+} from '../filesystem/owner-only-durable-file-write'
 import { isMissingFileError } from '../runtime/rpc/server/pairing/device-registry-corruption'
 
 type TurnEnded = Extract<ConnectorEvent, { kind: 'turn-ended' }>
@@ -147,6 +151,7 @@ class TurnOutboxFile {
         this.staleTempsSwept = true
         // A quit cut off mid-write leaves its staged file; only other processes' are taken.
         await removeStaleDurableWriteTempFiles(this.path)
+        await removeStaleOwnerOnlyStaging(dirname(this.path))
       }
       if (state === null) {
         await rm(this.path, { force: true })
