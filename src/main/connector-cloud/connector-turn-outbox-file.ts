@@ -9,7 +9,7 @@ import {
   type ConnectorEvent
 } from '../../shared/connectors/connector-cloud-contract'
 import { removeStaleDurableWriteTempFiles } from '../filesystem/durable-file-write'
-import { writeOwnerOnlyFileDurableIfCurrent } from '../filesystem/owner-only-durable-file-write'
+import { writeOwnerOnlyFileDurable } from '../filesystem/owner-only-durable-file-write'
 import { isMissingFileError } from '../runtime/rpc/server/pairing/device-registry-corruption'
 
 type TurnEnded = Extract<ConnectorEvent, { kind: 'turn-ended' }>
@@ -42,7 +42,7 @@ const files = new Map<string, TurnOutboxFile>()
 class TurnOutboxFile {
   // The newest state not yet on disk; undefined once the file holds it.
   private wanted: StoredState | undefined
-  // Bumped by every save, so a write already running for an older state never publishes it.
+  // Bumped by every save, so a drain sees a newer state arrived while it wrote.
   private generation = 0
   private running: Promise<void> | null = null
   private staleTempsSwept = false
@@ -113,7 +113,7 @@ class TurnOutboxFile {
     while (this.wanted !== undefined) {
       const { wanted, generation } = this
       const attempt = ++this.attempts
-      const landed = await this.commit(wanted, () => generation === this.generation)
+      const landed = await this.commit(wanted)
       if (generation !== this.generation) {
         continue
       }
@@ -141,7 +141,7 @@ class TurnOutboxFile {
     }
   }
 
-  private async commit(state: StoredState, current: () => boolean): Promise<boolean> {
+  private async commit(state: StoredState): Promise<boolean> {
     try {
       if (!this.staleTempsSwept) {
         this.staleTempsSwept = true
@@ -152,7 +152,9 @@ class TurnOutboxFile {
         await rm(this.path, { force: true })
         return true
       }
-      return await writeOwnerOnlyFileDurableIfCurrent(this.path, JSON.stringify(state), current)
+      // Never cut short by a newer save: under steady changes every write still lands, newest next.
+      await writeOwnerOnlyFileDurable(this.path, JSON.stringify(state))
+      return true
     } catch (error) {
       console.warn('[connector] could not save pending turn ends', error)
       return false

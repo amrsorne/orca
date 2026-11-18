@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type * as FsPromises from 'node:fs/promises'
@@ -8,18 +8,24 @@ import { ConnectorTurnEvents } from './connector-turn-events'
 
 // A deliberately slow disk: every write and delete waits for the test to let it through.
 const disk = vi.hoisted(() => {
-  let open = (): void => {}
-  let gate = Promise.resolve()
+  let held = false
+  const waiting: (() => void)[] = []
   return {
     writes: 0,
     deletes: 0,
     failDelete: false,
     failWrites: false,
     hold(): void {
-      gate = new Promise((resolve) => (open = resolve))
+      held = true
     },
-    release: (): void => open(),
-    wait: (): Promise<void> => gate
+    /** Lets the oldest waiting operation through, keeping the rest held. */
+    releaseOne: (): void => waiting.shift()?.(),
+    release(): void {
+      held = false
+      waiting.splice(0).forEach((resolve) => resolve())
+    },
+    wait: (): Promise<void> =>
+      held ? new Promise((resolve) => waiting.push(resolve)) : Promise.resolve()
   }
 })
 
@@ -42,15 +48,15 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 vi.mock('../filesystem/owner-only-durable-file-write', async (importOriginal) => {
   const actual = await importOriginal<typeof OwnerOnlyWrite>()
   return {
-    writeOwnerOnlyFileDurableIfCurrent: async (
-      ...args: Parameters<typeof actual.writeOwnerOnlyFileDurableIfCurrent>
+    writeOwnerOnlyFileDurable: async (
+      ...args: Parameters<typeof actual.writeOwnerOnlyFileDurable>
     ) => {
       disk.writes += 1
       await disk.wait()
       if (disk.failWrites) {
         throw Object.assign(new Error('full'), { code: 'ENOSPC' })
       }
-      return actual.writeOwnerOnlyFileDurableIfCurrent(...args)
+      return actual.writeOwnerOnlyFileDurable(...args)
     }
   }
 })
@@ -122,6 +128,19 @@ describe('ConnectorTurnEvents on a slow disk', () => {
     }
   )
 
+  it('lands a write a newer change overtook, so steady changes still reach the disk', async () => {
+    const events = new ConnectorTurnEvents(userDataPath, 'ada')
+    disk.hold()
+    events.observe(turnEnded(1))
+    await vi.waitFor(() => expect(disk.writes).toBe(1))
+    events.observe(turnEnded(2))
+    disk.releaseOne()
+    await vi.waitFor(() => expect(disk.writes).toBe(2))
+
+    const stored = JSON.parse(readFileSync(outbox, 'utf8')) as { turnEnds: { turnId: number }[] }
+    expect(stored.turnEnds.map(({ turnId }) => turnId)).toEqual([1])
+  })
+
   it('keeps a sign-out’s delete after it fails, until it lands', async () => {
     const events = new ConnectorTurnEvents(userDataPath, 'ada')
     events.observe(turnEnded(1))
@@ -144,7 +163,6 @@ describe('ConnectorTurnEvents on a slow disk', () => {
     await vi.waitFor(() => expect(disk.writes).toBe(2))
 
     await ConnectorTurnEvents.settled()
-    expect(disk.writes).toBe(3)
     expect(new ConnectorTurnEvents(userDataPath, 'ada').next(1)?.batch).toHaveLength(2)
   })
 
