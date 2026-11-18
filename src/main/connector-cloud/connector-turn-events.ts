@@ -1,20 +1,16 @@
 // The seam's watch, as the cloud reads it. Turn ends wait in an owner-only file so a restart still reports them.
-import { readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { z } from 'zod'
 import {
   cloudConversation,
   CONNECTOR_CLIENT_LIMITS,
-  ConnectorConversation,
   type ConnectorEvent
 } from '../../shared/connectors/connector-cloud-contract'
-import { writeSecureJsonFile } from '../../shared/secure-storage/secure-file'
 import type {
   ConversationEvent,
   ConversationSnapshot
 } from '../external-conversations/external-conversation-events'
-import { isMissingFileError } from '../runtime/rpc/server/pairing/device-registry-corruption'
 import { ConnectorOutbox, type ConnectorOutboxHead, type ConnectorStamp } from './connector-outbox'
+import { ConnectorTurnEndFile } from './connector-turn-outbox-file'
 import { connectorSnapshot, jsonBytes, unsupported } from './connector-snapshot'
 
 const TURN_OUTBOX_FILE = 'connector-turn-outbox.json'
@@ -25,22 +21,6 @@ const MAX_LIVE_EVENTS = 500
 const EVENTS_BUDGET_BYTES = CONNECTOR_CLIENT_LIMITS.maxRequestBytes - 1024
 
 type TurnEnded = Extract<ConnectorEvent, { kind: 'turn-ended' }>
-
-// Tagged with the account that produced them, so another account never sends them after a relaunch.
-const StoredOutbox = z.object({
-  account: z.string().min(1),
-  turnEnds: z.array(
-    z.object({
-      kind: z.literal('turn-ended'),
-      conversation: ConnectorConversation,
-      paneKey: z.string().min(1),
-      turnId: z.number(),
-      at: z.number(),
-      stopReason: z.string().min(1).nullable(),
-      lastAssistantMessage: z.string().optional()
-    })
-  )
-})
 
 const isTurnEnded = (event: ConnectorEvent): event is TurnEnded => event.kind === 'turn-ended'
 const isLive = (event: ConnectorEvent): boolean =>
@@ -137,7 +117,7 @@ function boundEvents(events: ConnectorEvent[], sent: number): ConnectorEvent[] {
  */
 export class ConnectorTurnEvents {
   private readonly outbox: ConnectorOutbox<ConnectorEvent>
-  private readonly filePath: string
+  private readonly stored: ConnectorTurnEndFile
   // Something owed was dropped to stay within the caps; only a fresh snapshot restates it.
   private dropped = false
   private warnedTrimmed = false
@@ -146,16 +126,17 @@ export class ConnectorTurnEvents {
     userDataPath: string,
     readonly account: string
   ) {
-    this.filePath = join(userDataPath, TURN_OUTBOX_FILE)
+    this.stored = new ConnectorTurnEndFile(join(userDataPath, TURN_OUTBOX_FILE), account)
     this.outbox = new ConnectorOutbox<ConnectorEvent>({
       headSize: eventsHeadSize,
-      initial: this.readStored(),
+      initial: this.stored.read(),
       bound: (events, sent) => {
         const kept = boundEvents(events, sent)
         this.dropped ||= kept.length < events.length
         return kept
       },
-      onChange: (events) => this.store(events)
+      // Only a change to the turn ends touches the disk.
+      onChange: (events) => this.stored.save(events.filter(isTurnEnded))
     })
   }
 
@@ -199,38 +180,17 @@ export class ConnectorTurnEvents {
 
   /** Drops everything, file included: no other account can report these turns. */
   clear(): void {
+    this.stored.clear()
     this.outbox.restart([], () => false)
   }
 
   /** The same, before any owner exists in this process. */
   static clearStored(userDataPath: string): void {
-    rmSync(join(userDataPath, TURN_OUTBOX_FILE), { force: true })
+    ConnectorTurnEndFile.clearAt(join(userDataPath, TURN_OUTBOX_FILE))
   }
 
-  private readStored(): ConnectorEvent[] {
-    let raw: string
-    try {
-      raw = readFileSync(this.filePath, 'utf8')
-    } catch (error) {
-      if (isMissingFileError(error)) {
-        return []
-      }
-      throw error
-    }
-    try {
-      const parsed = StoredOutbox.safeParse(JSON.parse(raw))
-      return parsed.success && parsed.data.account === this.account ? parsed.data.turnEnds : []
-    } catch {
-      return []
-    }
-  }
-
-  private store(events: readonly ConnectorEvent[]): void {
-    const turnEnds = events.filter(isTurnEnded)
-    if (turnEnds.length === 0) {
-      rmSync(this.filePath, { force: true })
-    } else {
-      writeSecureJsonFile(this.filePath, { account: this.account, turnEnds })
-    }
+  /** Every queued save of pending turn ends, landed; for quit. */
+  static settled(): Promise<void> {
+    return ConnectorTurnEndFile.settled()
   }
 }

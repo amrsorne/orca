@@ -31,7 +31,8 @@ beforeEach(() => {
   userDataPath = mkdtempSync(join(tmpdir(), 'orca-connector-events-'))
 })
 
-afterEach(() => {
+afterEach(async () => {
+  await ConnectorTurnEvents.settled()
   vi.useRealTimers()
   rmSync(userDataPath, { recursive: true, force: true })
 })
@@ -50,7 +51,7 @@ describe('ConnectorTurnEvents', () => {
     expect(head?.batch[0]).toEqual({ kind: 'snapshot', conversations: [] })
   })
 
-  it('keeps 200 turn ends in all, never trimming the head in flight', () => {
+  it('keeps 200 turn ends in all, never trimming the head in flight', async () => {
     const events = new ConnectorTurnEvents(userDataPath, 'ada')
     for (let turn = 1; turn <= 50; turn++) {
       events.observe(turnEnded(turn))
@@ -59,6 +60,7 @@ describe('ConnectorTurnEvents', () => {
     for (let turn = 51; turn <= 300; turn++) {
       events.observe(turnEnded(turn))
     }
+    await ConnectorTurnEvents.settled()
     const { account, turnEnds: stored } = z
       .object({ account: z.string(), turnEnds: z.array(z.unknown()) })
       .parse(JSON.parse(readFileSync(join(userDataPath, 'connector-turn-outbox.json'), 'utf8')))

@@ -66,8 +66,9 @@ beforeEach(() => {
   fake = new FakeConnectorCloud()
 })
 
-afterEach(() => {
+afterEach(async () => {
   vi.useRealTimers()
+  await ConnectorTurnEvents.settled()
   rmSync(userDataPath, { recursive: true, force: true })
 })
 
@@ -192,6 +193,7 @@ describe('ConnectorPollClient', () => {
       at: 5
     })
     await settle()
+    await ConnectorTurnEvents.settled()
     const stored = JSON.parse(readFileSync(outboxFile, 'utf8')).turnEnds
     expect(stored).toHaveLength(1)
     // 8 KB would split a two-byte character after the leading 'x', so the cut steps back one byte.
@@ -205,6 +207,7 @@ describe('ConnectorPollClient', () => {
       expect.objectContaining({ kind: 'turn-ended', turnId: 100, at: 300 })
     )
     expect(fake.events).not.toContainEqual(expect.objectContaining({ paneKey: 'tab:2' }))
+    await ConnectorTurnEvents.settled()
     expect(existsSync(outboxFile)).toBe(false)
     second.client.stop()
   })
@@ -302,6 +305,7 @@ describe('ConnectorPollClient', () => {
       stopReason: 'success',
       at: 9
     })
+    await ConnectorTurnEvents.settled()
     expect(existsSync(join(userDataPath, 'connector-turn-outbox.json'))).toBe(true)
     fake.online = true
     await settle(30_000)
